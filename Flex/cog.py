@@ -1,13 +1,29 @@
 import discord
 import tomllib
+import os
+import json
+import time
 
 from discord import app_commands
 from discord.ext import commands
 
 from ballsdex.core.models import BallInstance, Player
 
-
 CONFIG_PATH = "ballsdex/packages/flex/config.toml"
+DATA_PATH = "ballsdex/packages/flex/flex_data.json"
+
+
+def load_data():
+    if not os.path.exists(DATA_PATH):
+        with open(DATA_PATH, "w") as f:
+            json.dump({}, f)
+    with open(DATA_PATH, "r") as f:
+        return json.load(f)
+
+
+def save_data(data):
+    with open(DATA_PATH, "w") as f:
+        json.dump(data, f, indent=4)
 
 
 def load_config():
@@ -15,67 +31,104 @@ def load_config():
         return tomllib.load(f)["flex"]
 
 
+async def flex_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        player, _ = await Player.get_or_create(discord_id=interaction.user.id)
+        balls = await BallInstance.filter(player=player)
+    except Exception:
+        return []
+
+    current = current.lower()
+    choices = []
+
+    for inst in balls:
+        ball = inst.countryball
+        if not ball:
+            continue
+
+        label = (
+            f"#{inst.id:0X} {ball.country} "
+            f"ATK:{inst.attack_bonus:+d}% HP:{inst.health_bonus:+d}%"
+        )
+
+        if current in label.lower():
+            choices.append(app_commands.Choice(name=label[:100], value=str(inst.id)))
+
+        if len(choices) >= 25:
+            break
+
+    return choices
+
+
 class Flex(commands.Cog):
+    COOLDOWN_SECONDS = 86400
+
     def __init__(self, bot):
         self.bot = bot
         self.config = load_config()
 
-    @app_commands.command(name="flex", description="Submit one of your balls for flex approval.")
-    async def flex(self, interaction: discord.Interaction, ball_id: str):
-        raw = ball_id.strip()
-        if raw.startswith("#"):
-            raw = raw[1:]
+    @app_commands.command(
+        name="flex",
+        description="Submit one of your MarketDex items for moderator approval."
+    )
+    @app_commands.autocomplete(ball=flex_autocomplete)
+    async def flex(self, interaction: discord.Interaction, ball: str):
+        await interaction.response.defer(ephemeral=True)
+
+        data = load_data()
+        uid = str(interaction.user.id)
+
+        last = data.get(uid, {}).get("last_flex", 0)
+        now = time.time()
+
+        if now - last < self.COOLDOWN_SECONDS:
+            return await interaction.followup.send(
+                "Slow down there champ, you can only flex once every 24 hours.",
+                ephemeral=True
+            )
 
         try:
-            instance_id = int(raw, 16)
+            instance_id = int(ball)
         except ValueError:
-            await interaction.response.send_message(
-                "That doesn't look like a valid ball ID. Use the hex ID like `#ABC123`.",
-                ephemeral=True,
+            return await interaction.followup.send(
+                "Invalid selection.",
+                ephemeral=True
             )
-            return
 
         try:
             player, _ = await Player.get_or_create(discord_id=interaction.user.id)
             instance = await BallInstance.get(id=instance_id, player=player)
         except Exception:
-            await interaction.response.send_message(
-                "I couldn't find a ball with that ID that you own.",
-                ephemeral=True,
+            return await interaction.followup.send(
+                "You don't own that MarketDex ball.",
+                ephemeral=True
             )
-            return
 
         mod_channel = self.bot.get_channel(self.config["mod_approval_channel_id"])
         if not mod_channel:
-            await interaction.response.send_message(
-                "Flex system is not configured correctly (mod channel missing).",
-                ephemeral=True,
+            return await interaction.followup.send(
+                "Flex system not configured properly (missing mod channel).",
+                ephemeral=True
             )
-            return
 
         buffer = instance.draw_card()
         file = discord.File(buffer, "card.webp")
 
         emoji = None
-        if instance.countryball and hasattr(instance.countryball, "emoji_id"):
+        if instance.countryball:
             emoji = interaction.client.get_emoji(instance.countryball.emoji_id)
 
         name = (
             f"{emoji} {instance.countryball.country}"
-            if emoji and instance.countryball
-            else (
-                instance.countryball.country
-                if instance.countryball
-                else f"Ball #{instance.id:0X}"
-            )
+            if emoji and instance.countryball else instance.countryball.country
         )
 
         embed = discord.Embed(
-            title="New Flex Submission",
+            title="📤 New Flex Submission",
             description=(
                 f"From: {interaction.user.mention}\n"
                 f"ID: `#{instance.id:0X}`\n"
-                f"Ball: {name}"
+                f"Name: {name}"
             ),
             color=discord.Color.blurple(),
         )
@@ -85,40 +138,44 @@ class Flex(commands.Cog):
             bot=self.bot,
             instance_id=instance.id,
             owner_id=interaction.user.id,
-            public_channel_id=self.config["public_flex_channel"],
+            public_channel_id=self.config["public_flex_channel"]
         )
-
         msg = await mod_channel.send(embed=embed, file=file, view=view)
         view.message = msg
 
         try:
             await interaction.user.send(
-                f"Your flex submission for `#{instance.id:0X}` has been sent to moderators for review."
+                f"📨 Your flex for `#{instance.id:0X}` has been submitted to moderators!"
             )
-        except discord.Forbidden:
+        except:
             pass
 
-        await interaction.response.send_message(
-            "Your flex has been sent for approval.",
-            ephemeral=True,
+        data.setdefault(uid, {})["last_flex"] = now
+        save_data(data)
+
+        await interaction.followup.send(
+            "Your flex has been submitted!",
+            ephemeral=True
         )
 
 
 class FlexDecisionModal(discord.ui.Modal):
-    def __init__(self, view: "FlexApprovalView", approve: bool):
-        title = "Approve flex" if approve else "Deny flex"
-        super().__init__(title=title)
+    def __init__(self, view, approve):
+        super().__init__(title="Approve flex" if approve else "Deny flex")
         self.view_ref = view
         self.approve = approve
+
         self.notes = discord.ui.TextInput(
             label="Moderator note (optional)",
             style=discord.TextStyle.paragraph,
             required=False,
-            max_length=500,
+            max_length=500
         )
         self.add_item(self.notes)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
         instance_id = self.view_ref.instance_id
         owner_id = self.view_ref.owner_id
         public_channel_id = self.view_ref.public_channel_id
@@ -126,108 +183,94 @@ class FlexDecisionModal(discord.ui.Modal):
         try:
             owner_player, _ = await Player.get_or_create(discord_id=owner_id)
             instance = await BallInstance.get(id=instance_id, player=owner_player)
-        except Exception:
-            await interaction.response.send_message(
-                "This flex entry is no longer valid (ball not found or ownership changed).",
-                ephemeral=True,
-            )
+        except:
             self.view_ref.disable_all()
             if self.view_ref.message:
-                try:
-                    await self.view_ref.message.edit(view=self.view_ref)
-                except discord.HTTPException:
-                    pass
-            return
+                await self.view_ref.message.edit(view=self.view_ref)
+            return await interaction.followup.send(
+                "This ball no longer exists or ownership changed.",
+                ephemeral=True
+            )
 
         owner_user = interaction.client.get_user(owner_id)
 
         if self.approve:
             public_channel = interaction.client.get_channel(public_channel_id)
             if not public_channel:
-                await interaction.response.send_message(
+                return await interaction.followup.send(
                     "Public flex channel not found.",
-                    ephemeral=True,
+                    ephemeral=True
                 )
-                return
 
-            content, file, card_view = await instance.prepare_for_message(interaction)
+            content, file, v = await instance.prepare_for_message(interaction)
 
             header = (
-                f"✅ Flex approved by {interaction.user.mention}!\n"
+                "🎉 Flex Approved!\n"
                 f"Owner: <@{owner_id}>\n"
             )
             if self.notes.value:
-                header += f"Moderator note: {self.notes.value}\n\n"
+                header += f"Note: {self.notes.value}\n\n"
 
-            await public_channel.send(content=header + content, file=file, view=card_view)
-
-            await interaction.response.send_message(
-                "Flex approved and posted.",
-                ephemeral=True,
-            )
+            await public_channel.send(header + content, file=file, view=v)
 
             if owner_user:
                 try:
-                    msg = f"✅ Your flex for `#{instance.id:0X}` was approved by {interaction.user}."
+                    msg = f"Your flex `#{instance.id:0X}` was approved!"
                     if self.notes.value:
                         msg += f"\nModerator note: {self.notes.value}"
                     await owner_user.send(msg)
-                except discord.Forbidden:
+                except:
                     pass
+
+            await interaction.followup.send(
+                "Flex approved and posted!",
+                ephemeral=True
+            )
+
         else:
-            await interaction.response.send_message(
-                "Flex denied.",
-                ephemeral=True,
-            )
-
             if owner_user:
                 try:
-                    msg = f"❌ Your flex for `#{instance.id:0X}` was denied by {interaction.user}."
+                    msg = f"Your flex `#{instance.id:0X}` was denied."
                     if self.notes.value:
                         msg += f"\nModerator note: {self.notes.value}"
                     await owner_user.send(msg)
-                except discord.Forbidden:
+                except:
                     pass
+
+            await interaction.followup.send(
+                "Flex denied.",
+                ephemeral=True
+            )
 
         self.view_ref.disable_all()
         if self.view_ref.message:
             try:
                 await self.view_ref.message.edit(view=self.view_ref)
-            except discord.HTTPException:
+            except:
                 pass
 
 
 class FlexApprovalView(discord.ui.View):
-    def __init__(self, bot, instance_id: int, owner_id: int, public_channel_id: int):
+    def __init__(self, bot, instance_id, owner_id, public_channel_id):
         super().__init__(timeout=None)
         self.bot = bot
         self.instance_id = instance_id
         self.owner_id = owner_id
         self.public_channel_id = public_channel_id
-        self.message: discord.Message | None = None
+        self.message = None
 
     def disable_all(self):
         for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-
-    async def on_timeout(self):
-        self.disable_all()
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return True
+            child.disabled = True
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = FlexDecisionModal(self, approve=True)
-        await interaction.response.send_modal(modal)
+    async def approve(self, interaction, button):
+        await interaction.response.send_modal(
+            FlexDecisionModal(self, approve=True)
+        )
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
-    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = FlexDecisionModal(self, approve=False)
-        await interaction.response.send_modal(modal)
+    async def deny(self, interaction, button):
+        await interaction.response.send_modal(
+            FlexDecisionModal(self, approve=False)
+        )
