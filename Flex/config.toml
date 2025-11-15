@@ -1,7 +1,3 @@
 [flex]
-# Channel where mod approvals happen
-mod_channel = 
-
-# Channel where approved flexes are posted
-public_channel = 
-
+mod_approval_channel_id = 1439362856301756548
+public_flex_channel = 1439362703113195621
