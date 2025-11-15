@@ -7,8 +7,7 @@ import time
 
 from discord import app_commands
 from discord.ext import commands
-from ballsdex.core.models import Ball, balls
-
+from ballsdex.core.models import Ball, balls, Player, BallInstance
 
 CONFIG_PATH = "ballsdex/packages/merchant/config.toml"
 DATA_PATH = "ballsdex/packages/merchant/merchant_data.json"
@@ -43,35 +42,49 @@ class BuyButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         data = load_data()
         uid = str(interaction.user.id)
-        balance = data.get(uid, {}).get("balance", 0)
 
-        if balance < self.price:
-            await interaction.response.send_message(
-                f"❌ You need **{self.price - balance}** more {self.currency}!",
+        user_data = data.setdefault(uid, {"balance": 0, "last_claim": 0, "purchased_ids": []})
+
+        if self.ball.id in user_data["purchased_ids"]:
+            return await interaction.response.send_message(
+                "You've already bought this ball during this shop rotation.",
                 ephemeral=True
             )
-            return
 
-        data.setdefault(uid, {"balance": 0, "last_claim": 0})
-        data[uid]["balance"] -= self.price
+        if user_data["balance"] < self.price:
+            return await interaction.response.send_message(
+                f"❌ You need **{self.price - user_data['balance']}** more {self.currency}!",
+                ephemeral=True
+            )
+
+        user_data["balance"] -= self.price
+        user_data["purchased_ids"].append(self.ball.id)
         save_data(data)
 
-        emoji = interaction.client.get_emoji(self.ball.emoji_id)
-        emoji_display = emoji if emoji else "🎁"
-
-        await interaction.response.send_message(
-            f"{emoji_display} {interaction.user.mention} bought **{self.ball.country}** for **{self.price} {self.currency}**!"
+        player, _ = await Player.get_or_create(discord_id=interaction.user.id)
+        instance = await BallInstance.create(
+            ball_id=self.ball.id,
+            player=player
         )
 
-        log_channel_id = self.merchant_cog.config.get("transaction_log_channel", None)
-        if log_channel_id:
-            channel = interaction.client.get_channel(log_channel_id)
+        emoji = interaction.client.get_emoji(self.ball.emoji_id)
+        e = emoji if emoji else "🎁"
+
+        await interaction.response.send_message(
+            f"{e} {interaction.user.mention} bought **{self.ball.country}** "
+            f"(ID `#{instance.id:0X}`)!"
+        )
+
+        log_id = self.merchant_cog.config.get("transaction_log_channel")
+        if log_id:
+            channel = interaction.client.get_channel(log_id)
             if channel:
                 await channel.send(
-                    f"🧾 **Transaction Log**\n"
+                    f"🧾 **Purchase Log**\n"
                     f"User: {interaction.user.mention}\n"
-                    f"Item: **{self.ball.country}**\n"
-                    f"Price: **{self.price} {self.currency}**"
+                    f"Item: {self.ball.country}\n"
+                    f"Instance ID: `#{instance.id:0X}`\n"
+                    f"Cost: {self.price} {self.currency}"
                 )
 
 
@@ -87,19 +100,34 @@ class Merchant(commands.GroupCog, group_name="merchant"):
         min_rarity = self.config.get("min_rarity", 1)
         max_rarity = self.config.get("max_rarity", 200)
 
-        available_balls = [
-            ball for ball in balls.values()
-            if ball.enabled and min_rarity <= ball.rarity <= max_rarity
+        data = load_data()
+        for uid in data:
+            data[uid]["purchased_ids"] = []
+        save_data(data)
+
+        available = [
+            b for b in balls.values()
+            if b.enabled
+            and b.rarity is not None
+            and b.rarity >= 1
+            and min_rarity <= b.rarity <= max_rarity
         ]
 
-        if not available_balls:
+        if not available:
             self.shop_items = []
             return
 
-        self.shop_items = random.sample(available_balls, min(5, len(available_balls)))
+        weights = [max(1, int(b.rarity)) for b in available]
+
+        self.shop_items = random.choices(
+            available,
+            weights=weights,
+            k=min(5, len(available))
+        )
+
         self.last_refresh = time.time()
 
-    @app_commands.command(name="view", description="View the merchant's current items.")
+    @app_commands.command(name="view", description="View today's merchant stock.")
     async def view(self, interaction: discord.Interaction):
         currency = self.config.get("currency_name", "Market Tokens")
 
@@ -108,57 +136,54 @@ class Merchant(commands.GroupCog, group_name="merchant"):
 
         remaining = int(86400 - (time.time() - self.last_refresh))
         hours = max(0, remaining // 3600)
-        minutes = max(0, (remaining % 3600) // 60)
-        restock_text = f"⏳ Restocks in **{hours}h {minutes}m**"
-
-        if not self.shop_items:
-            await interaction.response.send_message("The merchant is resting. Check back later!")
-            return
+        mins = max(0, (remaining % 3600) // 60)
 
         embed = discord.Embed(
             title="🛍️ Merchant’s Market",
-            description=f"Spend your {currency} on exclusive Market Balls!\n{restock_text}",
+            description=f"Spend your {currency} on exclusive items.\n"
+                        f"Restocks in **{hours}h {mins}m**.",
             color=discord.Color.gold()
         )
 
         view = discord.ui.View()
 
         for ball in self.shop_items:
-            emoji = interaction.client.get_emoji(ball.emoji_id)
-            name = f"{emoji} {ball.country}" if emoji else ball.country
+            rarity = max(1, int(ball.rarity))
 
             max_rarity = 200
             min_rarity = 1
             max_price = 50
-            min_price = 2
+            min_price = 5
 
             price = int(
                 min_price
-                + (max_rarity - ball.rarity) * (max_price - min_price) / (max_rarity - min_rarity)
+                + (max_rarity - rarity) * (max_price - min_price)
+                / (max_rarity - min_rarity)
             )
+            price = max(price, min_price)
+
+            emoji = interaction.client.get_emoji(ball.emoji_id)
+            name = f"{emoji} {ball.country}" if emoji else ball.country
 
             embed.add_field(
                 name=name,
-                value=f"Rarity: {ball.rarity}\n💰 **{price} {currency}**",
+                value=f"Rarity: {ball.rarity}\nCost: **{price} {currency}**",
                 inline=False,
             )
 
-            button = BuyButton(self, ball, price, currency)
-            view.add_item(button)
+            view.add_item(BuyButton(self, ball, price, currency))
 
         await interaction.response.send_message(embed=embed, view=view)
 
-    @app_commands.command(name="refresh", description="Force refresh the merchant stock (Admin only).")
+    @app_commands.command(name="refresh", description="Force-refresh the merchant stock.")
     async def refresh(self, interaction: discord.Interaction):
-        admin_roles = self.config.get("admin_roles", [])
+        roles = self.config.get("admin_roles", [])
 
         if not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("❌ Must be used in a server.")
+            return await interaction.response.send_message("Not in a guild.", ephemeral=True)
 
-        if not any(role.id in admin_roles for role in interaction.user.roles):
-            return await interaction.response.send_message(
-                "🚫 You don’t have permission to do that.", ephemeral=True
-            )
+        if not any(r.id in roles for r in interaction.user.roles):
+            return await interaction.response.send_message("No permission.", ephemeral=True)
 
         self.refresh_shop()
         await interaction.response.send_message("🔄 Merchant stock refreshed!")
@@ -166,82 +191,78 @@ class Merchant(commands.GroupCog, group_name="merchant"):
     @app_commands.command(name="balance", description="Check your Market Token balance.")
     async def balance(self, interaction: discord.Interaction):
         data = load_data()
-        user_id = str(interaction.user.id)
+        uid = str(interaction.user.id)
         currency = self.config.get("currency_name", "Market Tokens")
-        user_data = data.get(user_id, {"balance": 0, "last_claim": 0})
-        balance = user_data.get("balance", 0)
+        user_data = data.get(uid, {"balance": 0, "last_claim": 0})
+        bal = user_data["balance"]
 
         now = time.time()
-        remaining = max(0, 86400 - (now - user_data.get("last_claim", 0)))
-        if remaining > 0:
-            hours = int(remaining // 3600)
-            minutes = int((remaining % 3600) // 60)
-            cooldown_text = f"Next daily in {hours}h {minutes}m"
+        left = max(0, 86400 - (now - user_data["last_claim"]))
+
+        if left > 0:
+            h = left // 3600
+            m = (left % 3600) // 60
+            cd = f"Next daily in {h}h {m}m"
         else:
-            cooldown_text = "Daily available now!"
+            cd = "Daily available."
 
         embed = discord.Embed(
             title=f"{interaction.user.display_name}'s Wallet",
-            description=f"💰 **{balance} {currency}**\n{cooldown_text}",
+            description=f"💰 **{bal} {currency}**\n{cd}",
             color=discord.Color.blurple()
         )
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="daily", description="Claim your daily Market Tokens.")
+    @app_commands.command(name="daily", description="Claim daily Market Tokens.")
     async def daily(self, interaction: discord.Interaction):
         data = load_data()
-        user_id = str(interaction.user.id)
+        uid = str(interaction.user.id)
         currency = self.config.get("currency_name", "Market Tokens")
-
         now = time.time()
-        user_data = data.get(user_id, {"balance": 0, "last_claim": 0})
-        last_claim = user_data.get("last_claim", 0)
 
-        if now - last_claim < 86400:
-            remaining = int(86400 - (now - last_claim))
-            hours = remaining // 3600
-            minutes = (remaining % 3600) // 60
-            await interaction.response.send_message(
-                f"🕓 {interaction.user.mention} can claim again in {hours}h {minutes}m.",
+        user = data.setdefault(uid, {"balance": 0, "last_claim": 0, "purchased_ids": []})
+
+        if now - user["last_claim"] < 86400:
+            left = int(86400 - (now - user["last_claim"]))
+            h = left // 3600
+            m = (left % 3600) // 60
+            return await interaction.response.send_message(
+                f"🕓 Claim again in {h}h {m}m.",
                 ephemeral=True
             )
-            return
 
         reward = random.randint(3, 10)
-        user_data["balance"] += reward
-        user_data["last_claim"] = now
-        data[user_id] = user_data
+        user["balance"] += reward
+        user["last_claim"] = now
         save_data(data)
 
         await interaction.response.send_message(
-            f"🎁 {interaction.user.mention} claimed **{reward} {currency}**!"
+            f"🎁 You claimed **{reward} {currency}**!"
         )
 
-    @app_commands.command(name="give", description="Give Market Tokens to a user (Admin only).")
+    @app_commands.command(name="give", description="Give Market Tokens.")
     async def give(self, interaction: discord.Interaction, user: discord.User, amount: int):
-        admin_roles = self.config.get("admin_roles", [])
+        roles = self.config.get("admin_roles", [])
         currency = self.config.get("currency_name", "Market Tokens")
 
         if not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("❌ Must be used in a server.")
+            return await interaction.response.send_message("Not in a guild.")
 
-        if not any(role.id in admin_roles for role in interaction.user.roles):
-            return await interaction.response.send_message(
-                "🚫 You don’t have permission to do that.", ephemeral=True
-            )
+        if not any(r.id in roles for r in interaction.user.roles):
+            return await interaction.response.send_message("No permission.", ephemeral=True)
 
         data = load_data()
         uid = str(user.id)
-        data.setdefault(uid, {"balance": 0, "last_claim": 0})
-        data[uid]["balance"] += amount
+        db = data.setdefault(uid, {"balance": 0, "last_claim": 0, "purchased_ids": []})
+        db["balance"] += amount
         save_data(data)
 
         await interaction.response.send_message(
-            f"Added **{amount} {currency}** to {user.mention}'s balance."
+            f"Gave **{amount} {currency}** to {user.mention}."
         )
 
         try:
-            await user.send(f"You received **{amount} {currency}** from an admin!")
+            await user.send(f"You received **{amount} {currency}**.")
         except discord.Forbidden:
             pass
 
