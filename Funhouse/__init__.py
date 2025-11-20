@@ -1,3 +1,4 @@
 from .cog import Funhouse
 
-__all__ = ["Funhouse"]
+async def setup(bot):
+    await bot.add_cog(Funhouse(bot))
