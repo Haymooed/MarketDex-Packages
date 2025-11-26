@@ -57,8 +57,8 @@ admin_panel/settings/local.py
 
 Add:
 ```python
-INSTALLED_APPS += [
-    "adminpanel.adventcalendar",
+INSTALLED_APPS.append("adventcalendar")
+,
 ]
 ```
 
