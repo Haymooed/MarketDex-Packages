@@ -90,7 +90,7 @@ class AdventCalendar(commands.GroupCog, name="advent"):
             )
 
         instance_kwargs = {
-            "countryball": ball,
+            "ball": ball,
             "player": player,
             "server_id": interaction.guild_id,
         }
