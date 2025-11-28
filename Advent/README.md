@@ -1,39 +1,200 @@
-# 🎄 Advent Calendar Package
+# 🎄 AdventCalendar-package-BD  
+A full Advent Calendar system for custom BallsDex / MarketDex instances.
 
-An Advent Calendar event for BallsDex/MarketDex. It adds a Discord bot cog (`/advent claim`) and a Django admin app so you can configure rewards for December 1–25 and track one claim per user per day.
+This package adds:  
+• A Discord slash command: **/advent claim**  
+• A full Django admin panel section to configure rewards for **Dec 1–25**  
+• Automatic tracking so each player can only claim once per day  
 
-> [!IMPORTANT]
-> More refurbished instructions comming soon
-
-## Features
-- Configurable rewards per Advent day (1–25): random special, selected ball, or selected ball with special.
-- Blacklist-aware claim handling that respects `bot.blacklist`.
-- Shared database tables for both Tortoise (bot) and Django (admin panel) models.
-- Prevents duplicate daily claims and logs claim timestamps for auditing.
 ---
-## Bot setup
-1. Ensure the package directory lives at `ballsdex/packages/adventcalendar`.
-2. Load the extension like other BallsDex packages (add `ballsdex.packages.adventcalendar` to config.yml).
-3. Confirm the Tortoise config includes `"ballsdex.packages.adventcalendar.models"` (the provided `ballsdex/__main__.py`).
+
+## 📌 What’s Included
+- Daily reward configuration for **1–25 December**
+- Three reward modes:  
+  **1)** Random enabled ball + random special  
+  **2)** Selected ball  
+  **3)** Selected ball + selected special  
+- Blacklist support (respects `bot.blacklist`)  
+- Logs every claim with timestamp  
+- Shared Django + Tortoise ORM models  
+- Prevents duplicate daily claims  
+
 ---
-## Admin panel setup
-1. Add to`INSTALLED_APPS` in `admin_panel/settings/local.py`: 
+
+## ⚠️ Important  
+This is a **custom** extension.  
+No official BallsDex support will be provided.
+
+For issues, DM **@Haymooed** or ping in the dev server.
+
+---
+
+## 📦 Installation
+
+# Step 1 — Add the package to your bot  
+Copy the folder **`adventcalendar`** into:
+
+```
+BallsDex-DiscordBot/ballsdex/packages/
+```
+
+Your final structure should look like:
+
+```
+ballsdex/
+ └── packages/
+      └── adventcalendar/
+          ├── __init__.py
+          ├── cog.py
+          ├── models.py
+          └── ...
+```
+
+---
+
+# Step 2 — Enable the package in `config.yml`  
+Inside your bot’s main configuration file:
+
+```yml
+packages:
+  - ballsdex.packages.adventcalendar
+```
+
+You MUST list it like other packages.
+
+---
+
+# Step 3 — Update Tortoise ORM (VERY IMPORTANT)
+
+In `ballsdex/__main__.py`, your `TORTOISE_ORM` **models list** must include:
+
+```py
+"models": [
+    "ballsdex.core.models",
+    "ballsdex.packages.adventcalendar.models",
+],
+```
+
+If this line is missing, the bot will crash on startup.
+
+---
+
+# Step 4 — Add Django Admin support  
+Copy the **admin_panel** folder named `adventcalendar` into:
+
+```
+BallsDex-DiscordBot/admin_panel/adventcalendar
+```
+
+It should look like:
+
+```
+admin_panel/
+ ├── admin_panel/
+ ├── adventcalendar/
+ │    ├── __init__.py
+ │    ├── admin.py
+ │    ├── models.py
+ │    └── apps.py
+```
+
+---
+
+# Step 5 — Install into Django (admin panel)
+
+Open:
+
+```
+admin_panel/admin_panel/settings/local.py
+```
+
+Add this line:
+
+```py
 INSTALLED_APPS.append("adventcalendar")
-2. Run migrations from the admin-panel container:
-   - `docker compose exec admin-panel python3 manage.py makemigrations adventcalendars`
-   - `docker compose exec admin-panel python3 manage.py migrate adventcalendars`
-3. Use the Django admin to create or edit entries for days 1–25, choosing reward type, enabled state, and optional ball/special.
----
-## Database models
-- `AdventDayConfig` stores the per-day reward setup (day, enabled flag, reward type, optional ball and special, description).
-- `AdventClaim` records each player's claim per day and enforces a unique `(player, day)` pair.
----
-## Using `/advent claim`
-- Valid only during December 1–25; outside that range the command responds that the event is inactive.
-- Blacklisted users receive "You are blacklisted from using this event." and cannot claim.
-- If no active config exists for the day, the bot replies "There is no active reward for today.".
-- Successful claims create a `BallInstance` for the chosen reward and log an `AdventClaim` entry, then reply with an embed showing the reward.
+```
 
-## Notes
-- For the `random_special` reward, the bot selects a random enabled `Ball` and a random `Special`.
-- For `selected_ball` and `selected_ball_with_special`, make sure the relevant ball (and special) fields are populated for that day; otherwise the bot treats the reward as misconfigured.
+Then run migrations:
+
+```bash
+docker compose exec admin-panel python3 manage.py makemigrations adventcalendar
+docker compose exec admin-panel python3 manage.py migrate adventcalendar
+```
+
+If you see “orphans”, run:
+
+```bash
+docker compose down --remove-orphans
+```
+
+---
+
+## 🎨 How to Use in Django Admin
+
+After installation, go to:
+
+```
+localhost:8000/admin
+```
+
+You will see:
+
+**Advent Calendar → Advent Day Config**  
+**Advent Calendar → Advent Claims**
+
+For each day **1–25**, set:
+
+- Day number  
+- Enabled  
+- Reward type  
+- Optional: Ball  
+- Optional: Special  
+- Optional: Label (small description)
+
+---
+
+## ❄️ `/advent claim` Command Behavior
+
+- Only works **Dec 1–25**  
+- Respects blacklist  
+- Prevents duplicate claims  
+- Rewards user instantly with a BallInstance  
+- Logs claim in database  
+- Sends a clean embed showing the reward  
+
+### Reward Logic
+| Reward Type | What Happens |
+|-------------|--------------|
+| Random Special | Picks random enabled Ball + random Special |
+| Selected Ball | Gives the chosen ball |
+| Selected Ball + Special | Gives chosen ball & chosen special |
+
+---
+
+## 🗂 Included Models (Tortoise + Django)
+
+### `AdventDayConfig`
+- day (1–25)  
+- enabled  
+- reward_type  
+- ball (optional)  
+- special (optional)  
+- label (description)  
+
+### `AdventClaim`
+- player  
+- day  
+- claimed_at  
+- unique per day per user  
+
+---
+
+## 🎁 Final Notes
+- If a day is misconfigured, `/advent claim` warns the user.  
+- If a user is blacklisted, the bot refuses the claim.  
+- If a player tries claiming twice, the bot blocks it.  
+- Works flawlessly once models + admin + config.yml are correct.
+
+---
+
+Enjoy your new Advent Calendar system!
