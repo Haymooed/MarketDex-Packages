@@ -58,14 +58,13 @@ admin_panel/settings/local.py
 Add:
 ```python
 INSTALLED_APPS.append("adventcalendar")
-,
-]
 ```
 
 #### 2. Run migrations:
 ```
-python manage.py makemigrations
-python manage.py migrate
+docker compose exec admin-panel python3 manage.py makemigrations adventcalendar
+
+docker compose exec admin-panel python3 manage.py migrate adventcalendar
 ```
 
 #### 3. Restart the admin panel
