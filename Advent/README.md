@@ -1,5 +1,9 @@
 # 🎄 Advent Calendar — BallsDex Package
 
+
+> [!IMPORTANT]
+> Not Finished Yet
+
 The **Advent Calendar** package adds a daily reward system for December (1st–25th).  
 Each day has a configurable reward that you set using the **BallsDex Admin Panel** (Django).
 
